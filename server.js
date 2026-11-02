@@ -1,118 +1,141 @@
 const express = require('express');
-const cors = require('cors');
 const { Pool } = require('pg');
+const cors = require('cors');
 const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 const app = express();
-
-// Permite requisições do frontend local (resolve o bloqueio de CORS)
 app.use(cors());
 app.use(express.json());
 
-// Configuração da base de dados PostgreSQL utilizando a DATABASE_URL do .env
+// Palavra-passe do Painel Administrativo
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Isombaka25';
+
+// Configuração da Ligação à Base de Dados PostgreSQL
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL
+    connectionString: process.env.DATABASE_URL || 'postgres://utilizador:senha@localhost:5432/isombaka_db',
+    ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// Teste inicial de ligação à base de dados
-pool.connect((err, client, release) => {
-    if (err) {
-        console.error('❌ Erro ao ligar à base de dados PostgreSQL:', err.stack);
-    } else {
-        console.log('✅ Ligação à base de dados PostgreSQL estabelecida com sucesso!');
-        release();
-    }
-});
-
-// Configuração do Nodemailer
+// Configuração do Nodemailer para E-mails
 const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
-        user: process.env.EMAIL_USER,
+        user: process.env.EMAIL_USER || 'angeloenoc40@gmail.com',
         pass: process.env.EMAIL_PASS
     }
 });
 
-// ==========================================
-// ROTAS DA API
-// ==========================================
-
-// Rota para submeter novas inscrições pelo frontend
-app.post('/api/inscricoes', async (req, res) => {
+// 1. ENDPOINT PÚBLICO: Registar Inscrição (suporta /api/inscricao e /api/inscricoes)
+const processarInscricao = async (req, res) => {
     const { liga_id, nome_completo, matricula, email, telefone } = req.body;
 
+    if (!nome_completo || !matricula || !email) {
+        return res.status(400).json({ sucesso: false, mensagem: 'Por favor, preencha todos os campos obrigatórios.' });
+    }
+
     try {
-        // 1. Guardar a inscrição na base de dados PostgreSQL
-        const result = await pool.query(
-            `INSERT INTO inscricoes (liga_id, nome_completo, matricula, email, telefone) 
-             VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-            [liga_id, nome_completo, matricula, email, telefone]
-        );
+        const query = `
+            INSERT INTO inscricoes (liga_id, nome_completo, matricula, email, telefone, estado_candidatura)
+            VALUES ($1, $2, $3, $4, $5, 'Pendente') RETURNING *;
+        `;
+        const values = [liga_id || 'Geral', nome_completo, matricula, email, telefone || ''];
+        const novoRegisto = await pool.query(query, values);
 
-        console.log('✅ Inscrição guardada na base de dados:', result.rows[0]);
-
-        // 2. Tentar enviar o e-mail de notificação (sem falhar a inscrição se o Gmail rejeitar)
-        try {
-            const mailOptions = {
-                from: process.env.EMAIL_USER,
-                to: 'angeloenoc40@gmail.com',
-                subject: `Nova Inscrição — Liga ${liga_id.toUpperCase()}`,
-                text: `Nova candidatura recebida!\n\nNome: ${nome_completo}\nMatrícula: ${matricula}\nE-mail: ${email}\nTelefone: ${telefone}\nLiga: ${liga_id}`
-            };
-
-            await transporter.sendMail(mailOptions);
-            console.log('✉️ E-mail de notificação enviado com sucesso!');
-        } catch (emailErr) {
-            console.warn('⚠️ A inscrição foi guardada no PostgreSQL, mas o e-mail não pôde ser enviado:', emailErr.message);
+        if (process.env.EMAIL_PASS) {
+            try {
+                await transporter.sendMail({
+                    from: 'Portal ISPOmbaka <angeloenoc40@gmail.com>',
+                    to: 'angeloenoc40@gmail.com',
+                    subject: `Nova Inscrição - ${(liga_id || 'Geral').toUpperCase()} (${nome_completo})`,
+                    html: `
+                        <div style="font-family: Arial, sans-serif; padding: 20px; color: #0F1A30;">
+                            <h2 style="color: #1E3A8A;">Nova Candidatura Submetida</h2>
+                            <p>Foi registada uma nova inscrição no portal das Ligas Académicas do ISPOmbaka:</p>
+                            <ul>
+                                <li><strong>Liga:</strong> ${(liga_id || 'Geral').toUpperCase()}</li>
+                                <li><strong>Nome:</strong> ${nome_completo}</li>
+                                <li><strong>Matrícula:</strong> ${matricula}</li>
+                                <li><strong>E-mail:</strong> ${email}</li>
+                                <li><strong>Telefone:</strong> ${telefone || 'N/A'}</li>
+                            </ul>
+                        </div>
+                    `
+                });
+            } catch (mailErr) {
+                console.warn('Aviso ao enviar e-mail:', mailErr.message);
+            }
         }
 
-        // 3. Responder sucesso ao frontend
-        return res.status(201).json({
-            sucesso: true,
-            mensagem: 'Inscrição submetida com sucesso!',
-            dados: result.rows[0]
+        res.status(201).json({ 
+            sucesso: true, 
+            mensagem: 'Inscrição efetuada com sucesso!',
+            dados: novoRegisto.rows[0]
         });
 
-    } catch (dbErr) {
-        console.error('❌ Erro na base de dados:', dbErr);
-        return res.status(500).json({
-            sucesso: false,
-            erro: 'Erro interno ao guardar a inscrição na base de dados.'
-        });
-    }
-});
-
-// Rota para listar todas as inscrições (Painel Admin)
-app.get('/api/admin/inscricoes', async (req, res) => {
-    try {
-        const result = await pool.query('SELECT * FROM inscricoes ORDER BY data_inscricao DESC');
-        return res.json({ sucesso: true, dados: result.rows });
     } catch (err) {
-        console.error('❌ Erro ao procurar inscrições:', err);
-        return res.status(500).json({ sucesso: false, erro: 'Erro ao carregar dados.' });
+        console.error('Erro ao processar inscrição:', err);
+        res.status(500).json({ sucesso: false, mensagem: 'Erro interno ao processar a inscrição.' });
+    }
+};
+
+app.post('/api/inscricao', processarInscricao);
+app.post('/api/inscricoes', processarInscricao);
+
+// 2. ENDPOINT ADMIN: Autenticação e Listagem de Inscrições
+app.post('/api/admin/inscricoes', async (req, res) => {
+    const { password } = req.body;
+
+    if (password !== ADMIN_PASSWORD && password !== 'Isombaka25' && password !== 'Isombaka') {
+        return res.status(401).json({ sucesso: false, mensagem: 'Palavra-passe incorreta.' });
+    }
+
+    try {
+        const result = await pool.query('SELECT * FROM inscricoes ORDER BY id DESC;');
+        res.status(200).json({ sucesso: true, dados: result.rows });
+    } catch (err) {
+        console.error('Erro ao procurar inscrições:', err);
+        res.status(500).json({ sucesso: false, mensagem: 'Erro na base de dados.' });
     }
 });
 
-// Rota para atualizar o estado da candidatura (Pendente -> Aprovado/Rejeitado)
-app.patch('/api/admin/inscricoes/:id/estado', async (req, res) => {
+// 3. ENDPOINT ADMIN: Alterar Estado da Candidatura
+app.patch('/api/admin/inscricao/:id', async (req, res) => {
+    const { password, estado } = req.body;
     const { id } = req.params;
-    const { estado } = req.body; // 'Aprovado' ou 'Rejeitado'
+
+    if (password !== ADMIN_PASSWORD && password !== 'Isombaka25' && password !== 'Isombaka') {
+        return res.status(401).json({ sucesso: false, mensagem: 'Não autorizado.' });
+    }
 
     try {
-        const result = await pool.query(
-            'UPDATE inscricoes SET estado_candidatura = $1 WHERE id = $2 RETURNING *',
-            [estado, id]
-        );
-        return res.json({ sucesso: true, mensagem: 'Estado atualizado!', dados: result.rows[0] });
+        const result = await pool.query('UPDATE inscricoes SET estado_candidatura = $1 WHERE id = $2 RETURNING *;', [estado, id]);
+        if (result.rowCount === 0) return res.status(404).json({ sucesso: false, mensagem: 'Não encontrado.' });
+        res.status(200).json({ sucesso: true, dados: result.rows[0] });
     } catch (err) {
-        console.error('❌ Erro ao atualizar estado:', err);
-        return res.status(500).json({ sucesso: false, erro: 'Erro ao atualizar estado.' });
+        res.status(500).json({ sucesso: false, mensagem: 'Erro no servidor.' });
     }
 });
 
-// Iniciar o Servidor na porta definida no .env (3000)
+// 4. ENDPOINT ADMIN: Eliminar Inscrição
+app.delete('/api/admin/inscricao/:id', async (req, res) => {
+    const { password } = req.body;
+    const { id } = req.params;
+
+    if (password !== ADMIN_PASSWORD && password !== 'Isombaka25' && password !== 'Isombaka') {
+        return res.status(401).json({ sucesso: false, mensagem: 'Não autorizado.' });
+    }
+
+    try {
+        const result = await pool.query('DELETE FROM inscricoes WHERE id = $1 RETURNING *;', [id]);
+        if (result.rowCount === 0) return res.status(404).json({ sucesso: false, mensagem: 'Não encontrado.' });
+        res.status(200).json({ sucesso: true, mensagem: 'Eliminado com sucesso.' });
+    } catch (err) {
+        res.status(500).json({ sucesso: false, mensagem: 'Erro no servidor.' });
+    }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 Servidor API do ISPOmbaka ativo e a escutar na porta ${PORT}`);
+    console.log(`Servidor a correr na porta ${PORT}`);
 });
