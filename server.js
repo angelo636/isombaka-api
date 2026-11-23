@@ -6,7 +6,8 @@ require('dotenv').config();
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Palavra-passe do Painel Administrativo
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Isombaka25';
@@ -278,6 +279,17 @@ app.post('/api/membro/validar', async (req, res) => {
     }
 
     return res.status(401).json({ sucesso: false, mensagem: 'Credenciais inválidas.' });
+});
+
+// Tratamento de erros de tamanho de requisição ou JSON malformado
+app.use((err, req, res, next) => {
+    if (err.type === 'entity.too.large') {
+        return res.status(413).json({
+            sucesso: false,
+            mensagem: 'O tamanho total dos dados enviados excede o limite permitido pelo servidor (50MB).'
+        });
+    }
+    return next(err);
 });
 
 const PORT = process.env.PORT || 3000;
